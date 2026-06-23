@@ -1,0 +1,5 @@
+{
+    "typeCheckingMode": "off",
+    "reportArgumentType": "warning",
+    "reportAttributeAccessIssue": "none"
+}
