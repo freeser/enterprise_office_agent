@@ -8,10 +8,12 @@ import uuid
 from typing import Optional, List, Dict, Any
 import logging
 
-from langchain.agents import AgentExecutor, create_react_agent
-from langchain_community.llms import Tongyi
-from langchain.prompts import PromptTemplate
-from langchain.memory import ConversationBufferWindowMemory
+from langchain_classic.agents import AgentExecutor
+from langchain_classic.agents.react.agent import create_react_agent
+
+from langchain_community.chat_models.tongyi import ChatTongyi as Tongyi
+from langchain_core.prompts import PromptTemplate
+from langchain_classic.memory import ConversationBufferWindowMemory
 
 from config.settings import settings
 from .memory_manager import MemoryManager
