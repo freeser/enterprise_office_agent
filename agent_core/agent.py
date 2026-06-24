@@ -11,7 +11,7 @@ import logging
 from langchain_classic.agents import AgentExecutor
 from langchain_classic.agents.react.agent import create_react_agent
 
-from langchain_community.chat_models.tongyi import ChatTongyi as Tongyi
+from langchain_openai import ChatOpenAI
 from langchain_core.prompts import PromptTemplate
 from langchain_classic.memory import ConversationBufferWindowMemory
 
@@ -72,7 +72,7 @@ Final Answer: 对用户的最终回复
 Question: {input}
 Thought: {agent_scratchpad}"""
 
-    def __init__(self, llm: Optional[Tongyi] = None, enable_planner: bool = True):
+    def __init__(self, llm: Optional[ChatOpenAI] = None, enable_planner: bool = True):
         if llm:
             self.llm = llm
         else:
@@ -90,10 +90,12 @@ Thought: {agent_scratchpad}"""
     def _init_llm(self):
         if settings.DASHSCOPE_API_KEY:
             os.environ["DASHSCOPE_API_KEY"] = settings.DASHSCOPE_API_KEY
-            self.llm = Tongyi(
-                model_name=settings.LLM_MODEL_NAME,
+            self.llm = ChatOpenAI(
+                model=settings.LLM_MODEL_NAME,
                 temperature=settings.LLM_TEMPERATURE,
-                max_tokens=settings.LLM_MAX_TOKENS
+                max_tokens=settings.LLM_MAX_TOKENS,
+                api_key=settings.DASHSCOPE_API_KEY,
+                base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
             )
             logger.info(f"LLM初始化成功，模型: {settings.LLM_MODEL_NAME}")
         else:
@@ -140,11 +142,57 @@ Thought: {agent_scratchpad}"""
         complex_keywords = ["分析", "报告", "生成", "图表", "可视化", "工作总结", "会议纪要", "审批"]
         return any(kw in user_input for kw in complex_keywords)
 
+    # LLM 常见参数名 → 工具实际参数名的映射（用于自动纠错）
+    PARAM_ALIASES: Dict[str, Dict[str, str]] = {
+        "knowledge_qa": {
+            "query": "question",
+            "query_text": "question",
+            "input": "question",
+        },
+        "document_generator": {
+            "action": "doc_type",
+            "type": "doc_type",
+        },
+        "api_tool": {},
+        "data_analyzer": {},
+    }
+
+    def _normalize_params(self, tool_name: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """将 LLM 生成的不规范参数名映射为工具实际需要的参数名"""
+        aliases = self.PARAM_ALIASES.get(tool_name, {})
+        if not aliases:
+            return params
+
+        normalized = dict(params)
+        for llm_name, real_name in aliases.items():
+            if llm_name in normalized and real_name not in normalized:
+                normalized[real_name] = normalized.pop(llm_name)
+                logger.info(f"参数名自动纠错: {tool_name}.{llm_name} → {real_name}")
+        return normalized
+
+    def _build_tool_schemas(self) -> Dict[str, Any]:
+        """构建工具 Schema 字典供 Planner 使用"""
+        schemas = {}
+        for tool in self.tool_registry.list_tools():
+            info = {"description": tool.description}
+            if hasattr(tool, 'args_schema') and tool.args_schema is not None:
+                try:
+                    json_schema = tool.args_schema.model_json_schema()
+                    info["properties"] = json_schema.get("properties", {})
+                    info["required"] = json_schema.get("required", [])
+                except Exception as e:
+                    logger.warning(f"无法获取工具 {tool.name} 的 Schema: {e}")
+                    info["properties"] = {}
+                    info["required"] = []
+            schemas[tool.name] = info
+        return schemas
+
     def _execute_planned_task(self, user_input: str, session_id: str,
                                user_id: Optional[str] = None) -> Dict[str, Any]:
         """多步骤任务执行（使用规划器）"""
         available_tools = self.tool_registry.get_tool_names()
-        task_steps = self.task_planner.plan(user_input, available_tools)
+        tool_schemas = self._build_tool_schemas()
+        task_steps = self.task_planner.plan(user_input, available_tools, tool_schemas)
         if not task_steps:
             return self._execute_single_step(user_input, session_id, user_id)
 
@@ -164,8 +212,10 @@ Thought: {agent_scratchpad}"""
                 final_output += f"\n[步骤{i+1} 失败] {error_msg}"
                 continue
 
+            # 参数名自动纠错
+            params = self._normalize_params(tool_name, params)
+
             try:
-                # 修复：使用标准调用 tool.invoke(params)
                 observation = tool.invoke(params)
                 all_steps.append({
                     "tool": tool_name,

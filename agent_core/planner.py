@@ -6,54 +6,97 @@
 from typing import List, Dict, Any, Optional
 import json
 import logging
-from langchain_community.llms import Tongyi
+from langchain_openai import ChatOpenAI
 from config.settings import settings
 
 logger = logging.getLogger(__name__)
 
 
+def _build_tool_schema_prompt(tool_schemas: Dict[str, Any]) -> str:
+    """根据工具 Schema 构建供 LLM 使用的参数说明文本"""
+    if not tool_schemas:
+        return ""
+
+    lines = ["各工具支持的参数："]
+
+    for tool_name, info in tool_schemas.items():
+        required = info.get("required", [])
+        properties = info.get("properties", {})
+        lines.append(f"\n🔧 {tool_name}")
+        if info.get("description"):
+            lines.append(f"   描述: {info['description']}")
+
+        for field_name, field_info in properties.items():
+            field_type = field_info.get("type", "string")
+            is_required = field_name in required
+            desc = field_info.get("description", "")
+            enum_vals = field_info.get("enum")
+
+            marker = "⭐必填" if is_required else "  可选"
+            extra = ""
+            if enum_vals:
+                extra = f" (可选值: {', '.join(repr(v) for v in enum_vals)})"
+            if desc:
+                extra += f" — {desc}"
+
+            lines.append(f"   {marker} {field_name}: {field_type}{extra}")
+
+    return "\n".join(lines)
+
+
 class TaskPlanner:
     """任务规划器 - 将复杂任务拆解为可执行的步骤"""
 
-    def __init__(self, llm: Optional[Tongyi] = None):
+    def __init__(self, llm: Optional[ChatOpenAI] = None):
         self.llm = llm
 
-    def plan(self, user_input: str, available_tools: List[str]) -> List[Dict[str, Any]]:
+    def plan(self, user_input: str, available_tools: List[str],
+             tool_schemas: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """
         规划任务步骤：优先使用 LLM，失败时回退到规则
+
+        Args:
+            user_input: 用户输入
+            available_tools: 可用工具名称列表
+            tool_schemas: 工具参数 Schema 字典 {tool_name: schema_info}
         """
         # 1. 尝试 LLM 规划
         if self.llm:
-            llm_plan = self._llm_based_plan(user_input, available_tools)
+            llm_plan = self._llm_based_plan(user_input, available_tools, tool_schemas)
             if llm_plan:
                 return llm_plan
         # 2. 规则降级
         return self._rule_based_plan(user_input)
 
-    def _llm_based_plan(self, user_input: str, available_tools: List[str]) -> Optional[List[Dict[str, Any]]]:
+    def _llm_based_plan(self, user_input: str, available_tools: List[str],
+                        tool_schemas: Optional[Dict[str, Any]] = None) -> Optional[List[Dict[str, Any]]]:
         """基于LLM进行规划，失败返回 None"""
         tools_str = ", ".join(available_tools)
+        schema_section = _build_tool_schema_prompt(tool_schemas) if tool_schemas else ""
+
         prompt = f"""你是一个任务规划专家。用户请求需要使用以下工具来完成任务：
 可用工具：{tools_str}
 
+{schema_section}
+
 用户请求：{user_input}
 
-请分析请求，将任务拆解为具体的步骤。每个步骤必须使用上述工具之一，输出JSON格式的步骤列表。
+请分析请求，将任务拆解为具体的步骤。每个步骤必须使用上述工具之一，必须使用工具要求的参数名和可选值，输出JSON格式的步骤列表。
 示例格式：
 [
     {{"tool": "data_analyzer", "params": {{"action": "read_data", "file_path": "data/sales_data.xlsx"}}}},
     {{"tool": "data_analyzer", "params": {{"action": "analyze"}}}},
-    {{"tool": "data_analyzer", "params": {{"action": "generate_report", "auto_generate_doc": true}}}},
 ]
 
 确保输出有效的JSON数组，不要包含任何额外文字。"""
 
         try:
             response = self.llm.invoke(prompt)
-            start = response.find('[')
-            end = response.rfind(']') + 1
+            response_text = response.content if hasattr(response, 'content') else str(response)
+            start = response_text.find('[')
+            end = response_text.rfind(']') + 1
             if start != -1 and end > start:
-                json_str = response[start:end]
+                json_str = response_text[start:end]
                 tasks = json.loads(json_str)
                 logger.info(f"LLM规划生成 {len(tasks)} 个步骤")
                 return tasks

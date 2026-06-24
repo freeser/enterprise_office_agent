@@ -6,7 +6,7 @@ from typing import List, Dict, Any, Optional
 import json
 import logging
 
-from langchain_community.llms import Tongyi
+from langchain_openai import ChatOpenAI
 
 logger = logging.getLogger(__name__)
 
@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 class Reflection:
     """反思器 - 分析失败原因并生成替代策略"""
     
-    def __init__(self, llm: Optional[Tongyi] = None):
+    def __init__(self, llm: Optional[ChatOpenAI] = None):
         self.llm = llm
         self.max_retries = 3
     
@@ -46,11 +46,12 @@ class Reflection:
         
         try:
             response = self.llm.invoke(prompt)
+            response_text = response.content if hasattr(response, 'content') else str(response)
             # 提取JSON对象
-            start = response.find('{')
-            end = response.rfind('}') + 1
+            start = response_text.find('{')
+            end = response_text.rfind('}') + 1
             if start != -1 and end > start:
-                adjusted = json.loads(response[start:end])
+                adjusted = json.loads(response_text[start:end])
                 return adjusted
         except Exception as e:
             logger.error(f"LLM反思分析失败: {e}")
@@ -103,10 +104,11 @@ class Reflection:
 请返回一个新的任务步骤列表，JSON数组格式。"""
             try:
                 response = self.llm.invoke(prompt)
-                start = response.find('[')
-                end = response.rfind(']') + 1
+                response_text = response.content if hasattr(response, 'content') else str(response)
+                start = response_text.find('[')
+                end = response_text.rfind(']') + 1
                 if start != -1 and end > start:
-                    return json.loads(response[start:end])
+                    return json.loads(response_text[start:end])
             except Exception as e:
                 logger.error(f"LLM替代计划生成失败: {e}")
         
@@ -124,7 +126,8 @@ class Reflection:
 
 总结："""
             try:
-                return self.llm.invoke(prompt).strip()
+                response = self.llm.invoke(prompt)
+                return (response.content if hasattr(response, 'content') else str(response)).strip()
             except Exception as e:
                 logger.error(f"LLM反思总结失败: {e}")
         
